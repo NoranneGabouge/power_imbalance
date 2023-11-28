@@ -5,8 +5,11 @@ in terms of quarter-hourly imbalance prediction: (i) weather variables, (ii) tim
 (iii) previous imbalances, using publicly available data and models including Logistic Regression, LDA, CART and 
 Random Forest.
 
-Preprocessing: Python, R
+Preprocessing: Python, R  
+
 Analytical models: R
 
-Completed: Spring 2020
+
+Completed: Spring 2020   
+
 Co-authors: Tim Schmidtlein, Qing Wen, Yiyang Wu, Xinyu Zhang
