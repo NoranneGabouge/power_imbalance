@@ -1,0 +1,281 @@
+---
+title: "IEOR 242 Project"
+output: #html_notebook
+---
+
+
+```{r}
+library(car) # for VIF
+library(caTools) # for sample.split
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(randomForest)
+library(gbm)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(MASS)
+library(ROCit)
+library(data.table)
+library(PRROC)
+library(forecast)#for timeseries
+```
+
+```{r}
+#Load data
+data <- read.csv('data.csv',header=TRUE,sep=';',na.strings=(""))
+
+#How many missing values / NA's?
+sum(is.na(data)==TRUE) # Total number of NA entries
+sum(is.na(filter(data,
+                 is.na(
+                   data$solar_4271_ATMO_LBERG)==FALSE))) #NA's w/o solar 4271
+```
+
+
+```{r}
+#RUN ONLY ONCE AT THE BEGINNING!!!
+
+#Make continuous variables numeric:
+data$balance_network <- sub(".", "", data$balance_network, fixed = TRUE)
+data$balance_network <- as.numeric(sub(",", ".", 
+                                       data$balance_network, fixed = TRUE))
+
+data$balance_Amprion <- sub(".", "", data$balance_Amprion, fixed = TRUE)
+data$balance_Amprion <- as.numeric(sub(",", ".", 
+                                       data$balance_Amprion, fixed = TRUE))
+
+data$balance_TenneT <- sub(".", "", data$balance_TenneT, fixed = TRUE)
+data$balance_TenneT <- as.numeric(sub(",", ".", 
+                                       data$balance_TenneT, fixed = TRUE))
+
+data$balance_50Hertz <- sub(".", "", data$balance_50Hertz, fixed = TRUE)
+data$balance_50Hertz <- as.numeric(sub(",", ".", 
+                                       data$balance_50Hertz, fixed = TRUE))
+
+data$balance_TransnetBW <- sub(".", "", data$balance_TransnetBW, fixed = TRUE)
+data$balance_TransnetBW <- as.numeric(sub(",", ".", 
+                                       data$balance_TransnetBW, fixed = TRUE))
+
+#Convert "date" from factor to datetime
+data$date <- strptime(data$date,format="%Y-%m-%d %H:%M:%S",tz="Europe/Berlin")
+
+#Derive new variables from existing ones:
+data$balance_network_pos <- as.factor(data$balance_network>0)
+data$balance_TransnetBW_pos <- as.factor(data$balance_TransnetBW>0)
+data$balance_50Hertz_pos <- as.factor(data$balance_50Hertz>0)
+data$balance_Amprion_pos <- as.factor(data$balance_Amprion>0)
+data$balance_TenneT_pos <- as.factor(data$balance_TenneT>0)
+
+data$hour <- as.factor(data$date$hour)
+data$quarterhour <- as.factor((data$date$hour)*4+((data$date$min)/15+1))
+data$weekday <- as.factor(data$date$wday) # 0=Sun, 1=Mon, 2=Tue, ...
+data$month <- as.factor(data$date$mon) # 0=Jan, 1=Feb, 2=Mar, ...
+data$year <- as.factor(data$date$year+1900)
+
+data$imbalance_prev_qh_network <- shift(data$balance_network,n=1,fill=NA)
+data$imbalance_prev_qh_Amprion <- shift(data$balance_Amprion,n=1,fill=NA)
+data$imbalance_prev_qh_TenneT <- shift(data$balance_TenneT,n=1,fill=NA)
+data$imbalance_prev_qh_50Hertz <- shift(data$balance_50Hertz,n=1,fill=NA)
+data$imbalance_prev_qh_TransnetBW <- shift(data$balance_TransnetBW, n=1, fill=NA)
+
+data$imbalance_prev_qh_network_pos <- shift(data$balance_network_pos,n=1,fill=NA)
+data$imbalance_prev_qh_Amprion_pos <- shift(data$balance_Amprion_pos,n=1,fill=NA)
+data$imbalance_prev_qh_TenneT_pos <- shift(data$balance_TenneT_pos,n=1,fill=NA)
+data$imbalance_prev_qh_50Hertz_pos <- shift(data$balance_50Hertz_pos,n=1,fill=NA)
+data$imbalance_prev_qh_TransnetBW_pos <- shift(data$balance_TransnetBW_pos, n=1, fill=NA)
+
+data$imbalance_lag12_network <- shift(data$balance_network,n=12,fill=NA)
+data$imbalance_lag13_network <- shift(data$balance_network,n=13,fill=NA)
+data$imbalance_lag14_network <- shift(data$balance_network,n=14,fill=NA)
+data$imbalance_lag15_network <- shift(data$balance_network,n=15,fill=NA)
+
+data$cloud_3379_V_N[data$cloud_3379_V_N==-1] <- NA
+data$cloud_4271_V_N[data$cloud_4271_V_N==-1] <- NA
+data$cloud_4928_V_N[data$cloud_4928_V_N==-1] <- NA
+data$cloud_891_V_N[data$cloud_891_V_N==-1] <- NA
+data$cloud_3379_V_N <- as.factor(data$cloud_3379_V_N)
+data$cloud_4271_V_N <- as.factor(data$cloud_4271_V_N)
+data$cloud_4928_V_N <- as.factor(data$cloud_4928_V_N)
+data$cloud_891_V_N <- as.factor(data$cloud_891_V_N)
+
+data$timeperiod<-1:nrow(data)
+
+data$date <- as.POSIXct(data$date)
+names(data)[names(data)=="solar_42928_ATMO_LBERG"] <- "solar_4928_ATMO_LBERG"
+```
+
+
+```{r}
+#Split the data
+train <- data[1:(0.75*nrow(data)),]
+test <- data[(0.75*nrow(data)):nrow(data),]
+```
+
+### Time series
+```{r}
+#Baseline : mean imbalance
+mean_network<-mean(train$balance_network)
+#RMSE on the train set
+sd(train$balance_network - mean_network)   #481.3263
+#MAE on the train set
+sum(abs(train$balance_network - mean_network))/nrow(train)  #363.9779
+#corresponding RMSE on the test set (R2 and OSR2 are 0)
+sqrt(sum((test$balance_network - mean_network)^2)/nrow(test))
+#554.2683
+#corresponding MAE on the test set
+sum(abs(test$balance_network - mean_network))/nrow(test)    # 406.5808
+#mean((train$balance_network-train$imbalance_prev_qh_network)[-1])#0.001753829
+
+ts_network<-ts(data$balance_network,start=1,frequency=1)
+ts_network_train<-ts(train$balance_network,start=1,frequency=1)
+ts_network_test<-ts(test$balance_network,start=105193,frequency=1)
+
+#extract a linear trend :
+#run linear regression with timeperiod as only independent variable 
+model_lin_trend_network<-lm(balance_network ~ timeperiod, data = train)
+summary(model_lin_trend_network)
+#-> as expected, very small R2 (0.009123), but the variable is marked as statistically significant
+#Create a new times series object without the trend :
+trend<-predict(model_lin_trend_network,newdata=data)
+data$balance_network_wo_trend<-data$balance_network-trend
+train <- data[1:(0.75*nrow(data)),]
+test <- data[(0.75*nrow(data)):nrow(data),]
+ts_network_wo_trend<-ts(data$balance_network_wo_trend,start=1,frequency=1)
+ts_network_wo_trendtrain<-ts(train$balance_network_wo_trend,start=1,frequency=1)
+ts_network_wo_trendtest<-ts(test$balance_network_wo_trend,start=105193,frequency=1)
+
+#Autocorrelation and partial autocorrelation
+acf(ts_network_train)
+pacf(ts_network_train)
+#NB : acf(ts_network_wo_trendtrain), pacf(ts_network_wo_trendtrain) are the same
+#-> show that balance(t) looks like an AR(1)° with coefficient phi~85% ; indeed the first portion of the acf shows exponential decrease, and the partial acf shows only one peak for lag 1 ;  for higher lags, the pacf is not significant(less than 0.1 in absolute value) -> reasonable to model the balance by an AR(1)
+
+model_network_ar1<-arima(ts_network_train, order = c(1, 0, 0)) # AR(1)
+summary(model_network_ar1)
+#       ar1  intercept 
+#  0.838262 125.440825 
+#Note : same results as linear regression with lag1 (it is exactly the same model), but this also gives the variance of the white noise eps_t (square of RMSE)
+sd(data$balance_network)
+accuracy(model_network_ar1) # from library(forecast)
+#RMSE on the training set : 262.449
+#MAE on the training set : 198.5911
+
+#MOdel the timeseries as an ARIMA
+#using auto.arima to fit an arima
+auto_arima_network <- auto.arima(ts_network_train)
+summary(auto_arima_network)#-> ARIMA(0,1,5)
+auto_arima_network_coeff=auto_arima_network$coef
+auto_arima_network_coeff
+auto_arima_network_sigma2=auto_arima_network$sigma2
+accuracy(auto_arima_network)
+#RMSE on the training set : 265.0682
+
+#compare them to predict next 5 values :
+forecast(auto_arima_network,5)$mean
+forecast(model_network_ar1,5)$mean
+test$balance_network[1:5]
+
+#plot frecasts
+#auto_arima_network %>%
+#  forecast(h=1) %>%
+#  autoplot() + autolayer(ts_network_test)
+
+arima_test <- Arima(ts_network_test, model=auto_arima_network)
+ar1_test <- Arima(ts_network_test, model=model_network_ar1)
+accuracy(ar1_test)#RMSE 303.5319
+accuracy(arima_test) #RMSE 305.5285
+```
+
+```{r}
+ts_op1<-ts(data$balance_TransnetBW,start=1,frequency=1)
+ts_op1_train<-ts(train$balance_TransnetBW,start=1,frequency=1)
+ts_op1_test<-ts(test$balance_TransnetBW,start=105193,frequency=1)
+
+ts_op2<-ts(data$balance_TenneT,start=1,frequency=1)
+ts_op2_train<-ts(train$balance_TenneT,start=1,frequency=1)
+ts_op2_test<-ts(test$balance_TenneT,start=105193,frequency=1)
+
+ts_op3<-ts(data$balance_Amprion,start=1,frequency=1)
+ts_op3_train<-ts(train$balance_Amprion,start=1,frequency=1)
+ts_op3_test<-ts(test$balance_Amprion,start=105193,frequency=1)
+
+ts_op4<-ts(data$balance_50Hertz,start=1,frequency=1)
+ts_op4_train<-ts(train$balance_50Hertz,start=1,frequency=1)
+ts_op4_test<-ts(test$balance_50Hertz,start=105193,frequency=1)
+```
+
+
+```{r}
+acf(ts_op2_train)
+pacf(ts_op2_train)
+
+# Aggregating predictions for each operator to predict network imbalance
+
+model_op1_ar1<-arima(ts_op1_train, order = c(1, 0, 0))
+model_op2_ar1<-arima(ts_op2_train, order = c(1, 0, 0))
+model_op3_ar1<-arima(ts_op3_train, order = c(1, 0, 0))
+model_op4_ar1<-arima(ts_op4_train, order = c(1, 0, 0))
+model_op1_ar1$coef[1]
+#       ar1  intercept 
+#   0.8432464 40.1606487
+# 0.8890212 -15.5014380 
+# 0.8624553 39.0061442
+# 0.9091749 61.8256902 
+
+#X[t] =  intercept*(1-ar1) + ar1*X[t-1]
+aggregated_ar1_prediction<-(model_op1_ar1$coef[2])*(1-model_op1_ar1$coef[1])+model_op1_ar1$coef[1]*data$imbalance_prev_qh_TransnetBW
++(model_op2_ar1$coef[2])*(1-model_op2_ar1$coef[1])+model_op2_ar1$coef[1]*data$imbalance_prev_qh_TenneT
++(model_op3_ar1$coef[2])*(1-model_op3_ar1$coef[1])+model_op3_ar1$coef[1]*data$imbalance_prev_qh_Amprion
++(model_op4_ar1$coef[2])*(1-model_op4_ar1$coef[1])+model_op4_ar1$coef[1]*data$imbalance_prev_qh_50Hertz
+
+df<-data.frame(data$balance_network,aggregated_ar1_prediction)
+#Split the data
+df_train <- df[1:(0.75*nrow(df)),]
+df_test <- df[(0.75*nrow(df)):nrow(df),]
+
+df_train <- na.omit(df_train)
+df_test <- na.omit(df_test)
+
+#RMSE and MAE on train test
+sqrt(sum((df_train$data.balance_network - df_train$aggregated_ar1_prediction)^2)/nrow(df_train))
+sum(abs(df_train$data.balance_network - mean_network))/nrow(df_train)  
+#RMSE and MAE on train test
+sqrt(sum((df_test$data.balance_network - df_test$aggregated_ar1_prediction)^2)/nrow(df_test))
+sum(abs(df_test$data.balance_network - mean_network))/nrow(df_test) 
+```
+```{r}
+#train an auto.arima on op2 (the only one without missing values in the train data)
+auto_arima_op2 <- auto.arima(ts_op2_train)
+summary(auto_arima_op2)#-> ARIMA(0,1,5)
+#                        ME     RMSE      MAE MPE MAPE      MASE       ACF1
+#Training set -0.0005338216 180.7785 134.4533 NaN  Inf 0.9934778 0.01376824
+arima_op2_test <- Arima(ts_op2_test, model=auto_arima_op2)
+accuracy(arima_op2_test) #RMSE 
+#                     ME     RMSE      MAE MPE MAPE      MASE       ACF1
+#Training set 0.03075195 206.3371 153.6719 NaN  Inf 0.9892853 0.08816497
+sd(train$balance_TenneT)#RMSE of baseline on the train : 388.7239
+```
+```{r}
+#train an auto.arima on op2 with specified max values for the parameters : d and p are lags (up to 1 hour=4 periods), D=seasonality (up to 1 day=96 periods), q=number of innovation lags (up to 3 hours)
+auto_arima_op2_restricted <- auto.arima(ts_op2_train,max.p=4,max.q=12,max.P=2,max.Q=4,max.D=96,approximation=TRUE)
+summary(auto_arima_op2)#-> ARIMA(0,1,5)
+#                        ME     RMSE      MAE MPE MAPE      MASE       ACF1
+#Training set -0.0005338216 180.7785 134.4533 NaN  Inf 0.9934778 0.01376824
+arima_op2_test <- Arima(ts_op2_test, model=auto_arima_op2)
+accuracy(arima_op2_test) #RMSE 
+#                     ME     RMSE      MAE MPE MAPE      MASE       ACF1
+#Training set 0.03075195 206.3371 153.6719 NaN  Inf 0.9892853 0.08816497
+sd(train$balance_TenneT)#RMSE of baseline on the train : 388.7239
+```
+
+Next step : work only on the wo_trend part, fit an arima and add the trend for prediction
+```{r}
+ttrain<-table(train$balance_network_pos)
+ttest<-table(test$balance_network_pos)
+ttrain[2]/(ttrain[1]+ttrain[2])
+ttest[2]/(ttest[1]+ttest[2])
+```
+
